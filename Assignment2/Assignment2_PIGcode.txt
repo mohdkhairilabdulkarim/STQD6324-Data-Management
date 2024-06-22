@@ -1,0 +1,85 @@
+-- [Load Data in Pig]
+
+-- Load the main dataset
+airline_data = LOAD '/user/maria_dev/khairil/airline/2008.csv' USING PigStorage(',') 
+AS (
+  Year:int, Month:int, DayofMonth:int, DayOfWeek:int, DepTime:int, CRSDepTime:int, ArrTime:int, CRSArrTime:int, 
+  UniqueCarrier:chararray, FlightNum:int, TailNum:chararray, ActualElapsedTime:int, CRSElapsedTime:int, AirTime:int, 
+  ArrDelay:int, DepDelay:int, Origin:chararray, Dest:chararray, Distance:int, TaxiIn:int, TaxiOut:int, Cancelled:int, 
+  CancellationCode:chararray, Diverted:int, CarrierDelay:int, WeatherDelay:int, NASDelay:int, SecurityDelay:int, 
+  LateAircraftDelay:int
+);
+
+-- Load the supporting datasets
+airports = LOAD '/user/maria_dev/khairil/airline/airports.csv' USING PigStorage(',') 
+AS (AirportID:int, Airport:chararray, City:chararray, State:chararray, Country:chararray, Latitude:float, Longitude:float);
+
+carriers = LOAD '/user/maria_dev/khairil/airline/carriers.csv' USING PigStorage(',') 
+AS (Code:chararray, Description:chararray);
+
+plane_data = LOAD '/user/maria_dev/khairil/airline/plane-data.csv' USING PigStorage(',') 
+AS (TailNum:chararray, planeYear:int, type:chararray, manufacturer:chararray, issue_date:chararray, model:chararray, 
+status:chararray, aircraft_type:chararray, engine_type:chararray, Year:int);
+
+-- [Analyze Optimal Times for Minimizing Flight Delays]
+
+-- Find the average delay by hour of the day
+by_hour = GROUP airline_data BY DepTime / 100;
+avg_delay_by_hour = FOREACH by_hour GENERATE FLATTEN(group) AS Hour, AVG(airline_data.ArrDelay) AS AvgDelay;
+ordered_avg_delay_by_hour = ORDER avg_delay_by_hour BY AvgDelay ASC;
+
+-- Find the average delay by day of the week
+by_day_of_week = GROUP airline_data BY DayOfWeek;
+avg_delay_by_day = FOREACH by_day_of_week GENERATE FLATTEN(group) AS DayOfWeek, AVG(airline_data.ArrDelay) AS AvgDelay;
+ordered_avg_delay_by_day = ORDER avg_delay_by_day BY AvgDelay ASC;
+
+-- Find the average delay by month of the year
+by_month = GROUP airline_data BY Month;
+avg_delay_by_month = FOREACH by_month GENERATE FLATTEN(group) AS Month, AVG(airline_data.ArrDelay) AS AvgDelay;
+ordered_avg_delay_by_month = ORDER avg_delay_by_month BY AvgDelay ASC;
+
+-- [Analyze Primary Factors Contributing to Flight Delays]
+
+-- Calculate total delay
+airline_data_with_total_delay = FOREACH airline_data GENERATE *, 
+(CarrierDelay + WeatherDelay + NASDelay + SecurityDelay + LateAircraftDelay) AS TotalDelay;
+
+-- Aggregate delay reasons
+delay_factors = FOREACH (GROUP airline_data_with_total_delay ALL) GENERATE 
+AVG(airline_data_with_total_delay.CarrierDelay) AS AvgCarrierDelay, 
+AVG(airline_data_with_total_delay.WeatherDelay) AS AvgWeatherDelay, 
+AVG(airline_data_with_total_delay.NASDelay) AS AvgNASDelay, 
+AVG(airline_data_with_total_delay.SecurityDelay) AS AvgSecurityDelay, 
+AVG(airline_data_with_total_delay.LateAircraftDelay) AS AvgLateAircraftDelay, 
+AVG(airline_data_with_total_delay.TotalDelay) AS AvgTotalDelay;
+
+-- [Analyze Factors Leading to Flight Cancellations]
+
+-- Analyze cancellations by reason
+by_cancellation = GROUP airline_data BY CancellationCode;
+count_cancellations = FOREACH by_cancellation GENERATE FLATTEN(group) AS CancellationCode, COUNT(airline_data) AS Count;
+ordered_cancellations = ORDER count_cancellations BY Count DESC;
+
+-- [Identify Most Frequently Delayed and Cancelled Flights]
+
+-- Flights with most delays
+delayed_flights = FILTER airline_data BY ArrDelay > 15;
+grouped_delayed_flights = GROUP delayed_flights BY FlightNum;
+count_delays_by_flight = FOREACH grouped_delayed_flights GENERATE FLATTEN(group) AS FlightNum, COUNT(delayed_flights) AS DelayCount;
+ordered_delays_by_flight = ORDER count_delays_by_flight BY DelayCount DESC;
+
+-- Flights with most cancellations
+cancelled_flights = FILTER airline_data BY Cancelled == 1;
+grouped_cancelled_flights = GROUP cancelled_flights BY FlightNum;
+count_cancellations_by_flight = FOREACH grouped_cancelled_flights GENERATE FLATTEN(group) AS FlightNum, COUNT(cancelled_flights) AS CancelCount;
+ordered_cancellations_by_flight = ORDER count_cancellations_by_flight BY CancelCount DESC;
+
+-- [Store all the results]
+
+STORE ordered_avg_delay_by_hour INTO '/user/maria_dev/khairil/airline/avg_delay_by_hour' USING PigStorage(',');
+STORE ordered_avg_delay_by_day INTO '/user/maria_dev/khairil/airline/avg_delay_by_day' USING PigStorage(',');
+STORE ordered_avg_delay_by_month INTO '/user/maria_dev/khairil/airline/avg_delay_by_month' USING PigStorage(',');
+STORE delay_factors INTO '/user/maria_dev/khairil/airline/delay_factors' USING PigStorage(',');
+STORE ordered_cancellations INTO '/user/maria_dev/khairil/airline/cancellations' USING PigStorage(',');
+STORE ordered_delays_by_flight INTO '/user/maria_dev/khairil/airline/delays_by_flight' USING PigStorage(',');
+STORE ordered_cancellations_by_flight INTO '/user/maria_dev/khairil/airline/cancellations_by_flight' USING PigStorage(',');
