@@ -1,0 +1,92 @@
+from pyspark.sql import SparkSession
+from pyspark.sql import Row
+from pyspark.sql.functions import col, count, explode, avg, desc
+
+def parseRatingInput(line):
+    fields = line.split('\t')
+    try:
+        return Row(user_id=int(fields[0]), movie_id=int(fields[1]), rating=int(fields[2]), timestamp=int(fields[3]))
+    except ValueError:
+        return None
+
+def parseMovieInput(line):
+    fields = line.split('|')
+    return Row(movie_id=int(fields[0]), title=fields[1], genres=fields[5:])
+
+
+if __name__ == "__main__":
+    # Initialize Spark session with MongoDB configuration
+    spark = SparkSession.builder \
+        .appName("MongoIntegration") \
+        .config("spark.mongodb.output.uri", "mongodb://127.0.0.1/movielens.ratings") \
+        .config("spark.mongodb.input.uri", "mongodb://127.0.0.1/movielens.ratings") \
+        .getOrCreate()
+
+    # Load and parse the ratings data
+    rating_lines = spark.sparkContext.textFile("hdfs:///user/maria_dev/khairil/u.data")
+    ratings = rating_lines.map(parseRatingInput).filter(lambda x: x is not None)
+    ratingsDF = spark.createDataFrame(ratings)
+
+    movies_lines = spark.sparkContext.textFile("hdfs:///user/maria_dev/khairil/u.item")
+    movies = movies_lines.map(parseMovieInput)
+    moviesDF = spark.createDataFrame(movies)
+
+    # Write DataFrames into MongoDB
+    ratingsDF.write.format("com.mongodb.spark.sql.DefaultSource") \
+        .mode('append').save()
+    moviesDF.write.format("com.mongodb.spark.sql.DefaultSource") \
+        .mode('append').save()
+
+
+    # Read DataFrames back from MongoDB
+    ratingsDF = spark.read.format("com.mongodb.spark.sql.DefaultSource") \
+        .load()
+    moviesDF = spark.read.format("com.mongodb.spark.sql.DefaultSource") \
+        .load()
+
+
+    # Create Temp Views for SQL queries
+    ratingsDF.createOrReplaceTempView("ratings")
+    moviesDF.createOrReplaceTempView("movies")
+
+    # Count the number of ratings per user
+    user_ratings_count = ratingsDF.groupBy("user_id").agg(count("movie_id").alias("movie_count"))
+
+    # Filter users who have rated at least 50 movies
+    active_users = user_ratings_count.filter(col("movie_count") >= 50)
+
+    # Filter out rows where user_id is null
+    filtered_active_users = active_users.filter(col("user_id").isNotNull())
+
+    # Show the top 10 results, now excluding rows with null user_id
+    filtered_active_users.orderBy(col("movie_count").desc()).show(10)
+
+
+    ## Top user with his/her favorite movie genres
+
+    # Get the top user who rated the most movies
+    top_user_id = filtered_active_users.orderBy(col("movie_count").desc()).first().user_id
+
+    # Join ratings with items to get the genre information
+    ratings_with_genres = ratingsDF.alias("r").join(moviesDF.alias("i"), col("r.movie_id") == col("i.movie_id"))
+
+    # Filter out movies where the title is None
+    ratings_with_valid_titles = ratings_with_genres.filter(col("i.title").isNotNull() & (col("i.title") != "None"))
+
+    # Continue with existing processing to get top user ratings, etc.
+    top_user_ratings = ratings_with_valid_titles.filter(col("r.user_id") == top_user_id)
+
+    # Calculating top 10 recommendations
+    movie_ratings_avg = top_user_ratings.groupBy("r.movie_id", "i.title").agg(avg("r.rating").alias("avg_rating"))
+    top_10_recommendations = movie_ratings_avg.orderBy(desc("avg_rating")).limit(10).collect()
+
+    # Output
+    print("Top 10 favorite movie genres for UserID {}".format(top_user_id))
+    for movie in top_10_recommendations:
+        print("Movie: {}, Average Rating: {:.2f}".format(movie['title'], movie['avg_rating']))
+
+
+
+# Stop the Spark session
+spark.stop()
+
